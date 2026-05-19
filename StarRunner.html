@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>⭐ Star Runner</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d0820;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      user-select: none;
+    }
+    h1 {
+      color: #ffd700;
+      font-size: 22px;
+      letter-spacing: 4px;
+      margin-bottom: 12px;
+      text-shadow: 0 0 20px rgba(255,215,0,0.7);
+    }
+    #game {
+      display: block;
+      border-radius: 12px;
+      box-shadow: 0 0 50px rgba(140,60,255,0.5);
+    }
+    #hint {
+      color: rgba(255,255,255,0.35);
+      font-size: 13px;
+      margin-top: 10px;
+      letter-spacing: 1px;
+    }
+    #errbox {
+      display: none;
+      color: #ff4444;
+      font-size: 13px;
+      margin-top: 8px;
+      max-width: 600px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <h1>&#11088; STAR RUNNER &#11088;</h1>
+  <canvas id="game"></canvas>
+  <p id="hint">SPACE / CLICK / TAP &nbsp;&middot;&nbsp; double jump available!</p>
+  <div id="errbox"></div>
+
+<script>
+// ── global error catch ──────────────────────────────────────────────────────
+window.onerror = (msg, src, line) => {
+  const d = document.getElementById('errbox');
+  d.style.display = 'block';
+  d.textContent = 'JS Error: ' + msg + ' (line ' + line + ')';
+};
+
+// ── Canvas setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+
+const BASE_W = 780, BASE_H = 290;
+canvas.width  = BASE_W;
+canvas.height = BASE_H;
+
+const W      = BASE_W;
+const H      = BASE_H;
+const GROUND = H - 52;   // y of ground surface
+
+// ── Audio (best-effort) ─────────────────────────────────────────────────────
+let AC;
+function getAC() {
+  if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+  return AC;
+}
+function beep(freq, dur, type, vol) {
+  try {
+    const a = getAC(), o = a.createOscillator(), g = a.createGain();
+    o.type = type || 'sine'; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol || 0.1, a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(); o.stop(a.currentTime + dur);
+  } catch(e) {}
+}
+const sfxJump = () => beep(440, 0.12, 'sine', 0.13);
+const sfxJump2= () => beep(560, 0.11, 'sine', 0.10);
+const sfxDie  = () => { beep(220,.18,'sawtooth',.15); setTimeout(()=>beep(150,.4,'sawtooth',.12),120); };
+const sfxCoin = () => { beep(880,.07,'sine',.1); setTimeout(()=>beep(1100,.09,'sine',.1),70); };
+
+// ── Image loading ────────────────────────────────────────────────────────────
+let sprite = null;
+const img  = new Image();
+img.crossOrigin = 'anonymous';
+img.onload = () => {
+  try {
+    const off = document.createElement('canvas');
+    off.width = img.naturalWidth; off.height = img.naturalHeight;
+    const c = off.getContext('2d');
+    c.drawImage(img, 0, 0);
+    const d = c.getImageData(0, 0, off.width, off.height);
+    for (let i = 0; i < d.data.length; i += 4) {
+      if (d.data[i] < 50 && d.data[i+1] < 50 && d.data[i+2] < 50) d.data[i+3] = 0;
+    }
+    c.putImageData(d, 0, 0);
+    sprite = off;
+  } catch(e) { sprite = null; }
+};
+img.onerror = () => { sprite = null; };
+img.src = 'character.png';
+
+// ── Particles ────────────────────────────────────────────────────────────────
+let dusts = [], bursts = [];
+function spawnDust(x, y) {
+  for (let i = 0; i < 3; i++) {
+    dusts.push({ x: x + Math.random()*18, y, vx: -Math.random()*1.5, vy: -Math.random()-0.5, r: Math.random()*4+2, life: 1 });
+  }
+}
+function spawnBurst(x, y) {
+  for (let i = 0; i < 16; i++) {
+    const a = (i/16)*Math.PI*2, sp = Math.random()*5+2;
+    bursts.push({ x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp-2, r: Math.random()*5+2, life: 1 });
+  }
+}
+
+// ── Background stars ─────────────────────────────────────────────────────────
+const bgStars = Array.from({length:80}, () => ({
+  x: Math.random()*W, y: Math.random()*(GROUND-8),
+  r: Math.random()*1.6+0.4, spd: Math.random()*0.2+0.05,
+  phase: Math.random()*Math.PI*2
+}));
+
+// ── Game state ───────────────────────────────────────────────────────────────
+let state     = 'waiting';
+let score     = 0;
+let hiScore   = parseInt(localStorage.getItem('starRunnerHi')||'0', 10);
+let speed     = 4.2;
+let tick      = 0;
+let flashAlpha= 0;
+
+// ── Character ────────────────────────────────────────────────────────────────
+const JUMP_V  = -13;
+const GRAVITY = 0.58;
+const char = { x:100, y:GROUND, w:70, h:92, vy:0, jumps:0, maxJumps:2, bob:0, dead:false };
+
+// ── Obstacles ────────────────────────────────────────────────────────────────
+let obstacles  = [];
+let obstTimer  = 0;
+let obstGap    = 90;
+const PALETTES = [
+  ['#ff9966','#ff5522','#cc2200'],
+  ['#bb55ff','#8822cc','#440099'],
+  ['#44ccff','#1188cc','#004488'],
+];
+
+function addCrystal(x, w, h) {
+  obstacles.push({ x, w, h, y: GROUND-h, pal: PALETTES[Math.floor(Math.random()*3)] });
+}
+function spawnGroup() {
+  const r = Math.random();
+  if (r < 0.3)      { addCrystal(W+10, 22, 62); }
+  else if (r < 0.55){ addCrystal(W+10, 44, 36); }
+  else if (r < 0.75){ addCrystal(W+10, 20, 58); addCrystal(W+46, 20, 44); }
+  else              { addCrystal(W+10, 18, 52); addCrystal(W+42, 18, 64); addCrystal(W+74, 18, 46); }
+}
+
+// ── Input ────────────────────────────────────────────────────────────────────
+function onAction() {
+  if (state === 'waiting')  { state = 'playing'; try { getAC().resume(); } catch(e){} return; }
+  if (state === 'gameover') { doReset(); try { getAC().resume(); } catch(e){} return; }
+  if (char.jumps < char.maxJumps) {
+    char.vy = JUMP_V * (char.jumps===1 ? 0.82 : 1);
+    char.jumps++;
+    char.jumps===1 ? sfxJump() : sfxJump2();
+  }
+}
+document.addEventListener('keydown', e => {
+  if (e.code==='Space'||e.code==='ArrowUp') { e.preventDefault(); onAction(); }
+});
+canvas.addEventListener('pointerdown', e => { e.preventDefault(); onAction(); });
+
+// ── Reset ────────────────────────────────────────────────────────────────────
+function doReset() {
+  score=0; speed=4.2; tick=0; flashAlpha=0;
+  obstacles=[]; obstTimer=0; obstGap=90;
+  dusts=[]; bursts=[];
+  char.y=GROUND; char.vy=0; char.jumps=0; char.dead=false;
+  state='playing';
+}
+
+// ── Update ───────────────────────────────────────────────────────────────────
+let groundX = 0;
+function update() {
+  if (state !== 'playing') return;
+  tick++; score++;
+
+  if (tick % 450 === 0) { speed = Math.min(speed+0.35, 12); obstGap = Math.max(48, obstGap-2); }
+  if (score % 1000 === 0 && score > 0) sfxCoin();
+
+  // spawn
+  if (++obstTimer >= obstGap) { spawnGroup(); obstTimer=0; }
+  obstacles = obstacles.filter(o => o.x+o.w > -10);
+  for (const o of obstacles) o.x -= speed;
+
+  // physics
+  char.vy += GRAVITY;
+  char.y  = Math.min(char.y + char.vy, GROUND);
+  if (char.y >= GROUND) { char.vy=0; char.jumps=0; }
+  char.bob = char.y===GROUND ? Math.sin(tick*0.22)*3.5 : 0;
+
+  // dust
+  if (char.y===GROUND && tick%6===0) spawnDust(char.x+char.w*0.2, GROUND+2);
+  for (const d of dusts) { d.x+=d.vx; d.y+=d.vy; d.vy+=0.08; d.life-=0.07; }
+  dusts = dusts.filter(d=>d.life>0);
+
+  for (const b of bursts) { b.x+=b.vx; b.y+=b.vy; b.vy+=0.14; b.life-=0.026; }
+  bursts = bursts.filter(b=>b.life>0);
+
+  // scroll bg
+  for (const s of bgStars) { s.x -= s.spd*(speed/4.2); if (s.x<0) { s.x=W; s.y=Math.random()*(GROUND-8); } }
+  groundX = (groundX - speed) % 50;
+
+  // collision (with forgiveness)
+  const hx = char.x+14, hy = char.y-char.h+14, hw = char.w-28, hh = char.h-20;
+  for (const o of obstacles) {
+    if (hx < o.x+o.w && hx+hw > o.x && hy < o.y+o.h && hy+hh > o.y) {
+      state='gameover'; char.dead=true; flashAlpha=1;
+      if (score>hiScore) { hiScore=score; localStorage.setItem('starRunnerHi',hiScore); }
+      spawnBurst(hx+hw/2, hy+hh/2);
+      sfxDie();
+      return;
+    }
+  }
+  if (flashAlpha>0) flashAlpha -= 0.04;
+}
+
+// ── Draw ─────────────────────────────────────────────────────────────────────
+function draw() {
+  // sky
+  const sky = ctx.createLinearGradient(0,0,0,GROUND);
+  sky.addColorStop(0,'#06082a');
+  sky.addColorStop(1,'#0f0a38');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0,0,W,GROUND);
+
+  // bg stars
+  for (const s of bgStars) {
+    const t = 0.45 + 0.55*Math.sin(tick*0.04+s.phase);
+    ctx.globalAlpha = t;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // ground fill
+  const gnd = ctx.createLinearGradient(0,GROUND,0,H);
+  gnd.addColorStop(0,'#1c0d40');
+  gnd.addColorStop(1,'#0d0620');
+  ctx.fillStyle = gnd;
+  ctx.fillRect(0, GROUND, W, H-GROUND);
+
+  // ground glow line
+  ctx.save();
+  ctx.shadowColor='#aa55ff'; ctx.shadowBlur=16;
+  ctx.strokeStyle='#cc77ff'; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.moveTo(0,GROUND); ctx.lineTo(W,GROUND); ctx.stroke();
+  ctx.restore();
+
+  // ground dots
+  ctx.fillStyle='rgba(170,80,255,0.3)';
+  for (let x = (groundX%50); x < W; x += 50) {
+    ctx.beginPath(); ctx.arc(x, GROUND+8, 3, 0, Math.PI*2); ctx.fill();
+  }
+
+  // dust
+  for (const d of dusts) {
+    ctx.globalAlpha = d.life * 0.4;
+    ctx.fillStyle = '#cc88ff';
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.r*d.life, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // crystals
+  for (const o of obstacles) {
+    const [c0,c1,c2] = o.pal;
+    ctx.save();
+    ctx.shadowColor=c0; ctx.shadowBlur=20;
+    const og = ctx.createLinearGradient(o.x, o.y, o.x+o.w, o.y+o.h);
+    og.addColorStop(0,c0); og.addColorStop(.5,c1); og.addColorStop(1,c2);
+    ctx.fillStyle = og;
+    ctx.beginPath();
+    ctx.moveTo(o.x+o.w*.5,  o.y);
+    ctx.lineTo(o.x+o.w,     o.y+o.h*.45);
+    ctx.lineTo(o.x+o.w*.78, o.y+o.h);
+    ctx.lineTo(o.x+o.w*.22, o.y+o.h);
+    ctx.lineTo(o.x,          o.y+o.h*.45);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // shine
+    ctx.fillStyle='rgba(255,255,255,0.2)';
+    ctx.beginPath();
+    ctx.moveTo(o.x+o.w*.5, o.y+5);
+    ctx.lineTo(o.x+o.w*.68, o.y+o.h*.38);
+    ctx.lineTo(o.x+o.w*.44, o.y+o.h*.2);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // burst
+  for (const b of bursts) {
+    ctx.globalAlpha = b.life;
+    ctx.save();
+    ctx.shadowColor='#ffaa00'; ctx.shadowBlur=10;
+    ctx.fillStyle = `hsl(${40+b.life*50},100%,65%)`;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r*b.life, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+
+  // character
+  const bobY = char.y===GROUND ? char.bob : 0;
+  const lean = char.y < GROUND ? -8 : 0;
+  ctx.save();
+  if (char.dead) { ctx.globalAlpha=0.6; ctx.filter='grayscale(1)'; }
+  ctx.translate(char.x + char.w/2, char.y - char.h/2 + bobY);
+  ctx.rotate(lean * Math.PI/180);
+  if (sprite) {
+    ctx.drawImage(sprite, -char.w/2, -char.h/2, char.w, char.h);
+  } else {
+    // fallback chibi
+    ctx.fillStyle='#ff4422';
+    ctx.beginPath(); ctx.ellipse(0,5,20,26,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#ffcc88';
+    ctx.beginPath(); ctx.arc(0,-24,18,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#cc2200';
+    ctx.beginPath(); ctx.arc(0,-38,14,Math.PI,0); ctx.fill();
+    ctx.fillStyle='#ffd700';
+    ctx.font='bold 16px serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('★',0,-38);
+  }
+  ctx.restore();
+
+  // HUD score
+  ctx.save();
+  ctx.font='bold 17px monospace';
+  ctx.textAlign='right';
+  ctx.fillStyle='#ffd700';
+  ctx.shadowColor='rgba(255,215,0,0.6)'; ctx.shadowBlur=10;
+  ctx.fillText('* '+String(Math.floor(score/10)).padStart(5,'0'), W-14, 30);
+  ctx.shadowBlur=0;
+  ctx.font='12px monospace';
+  ctx.fillStyle='rgba(255,215,0,0.5)';
+  ctx.fillText('HI '+String(Math.floor(hiScore/10)).padStart(5,'0'), W-14, 48);
+  ctx.restore();
+
+  // ── overlays ──
+  if (state==='waiting') {
+    ctx.fillStyle='rgba(0,0,0,0.25)';
+    ctx.fillRect(0,0,W,H);
+
+    ctx.save();
+    ctx.textAlign='center';
+    ctx.font='bold 38px Arial';
+    ctx.fillStyle='#ffd700';
+    ctx.shadowColor='rgba(255,200,0,0.9)'; ctx.shadowBlur=24;
+    ctx.fillText('STAR RUNNER', W/2, H*0.38);
+    ctx.shadowBlur=0;
+
+    const p = 0.65 + 0.35*Math.sin(tick*0.07);
+    ctx.globalAlpha=p;
+    ctx.font='20px Arial';
+    ctx.fillStyle='#ffffff';
+    ctx.fillText('กด SPACE / คลิก / แตะ เพื่อเริ่ม', W/2, H*0.60);
+    ctx.globalAlpha=0.5;
+    ctx.font='15px Arial';
+    ctx.fillStyle='#ddddff';
+    ctx.fillText('กระโดดได้ 2 ครั้ง  •  หลบคริสตัล', W/2, H*0.76);
+    ctx.restore();
+  }
+
+  if (state==='gameover') {
+    if (flashAlpha>0) {
+      ctx.fillStyle=`rgba(255,50,0,${flashAlpha*0.3})`;
+      ctx.fillRect(0,0,W,H);
+    }
+
+    const bw=320, bh=150, bx=W/2-160, by=H/2-75;
+    ctx.fillStyle='rgba(6,3,18,0.88)';
+    ctx.strokeStyle='#ff5533';
+    ctx.lineWidth=2;
+    // rounded rect polyfill
+    const r=12;
+    ctx.beginPath();
+    ctx.moveTo(bx+r,by);
+    ctx.lineTo(bx+bw-r,by); ctx.quadraticCurveTo(bx+bw,by,bx+bw,by+r);
+    ctx.lineTo(bx+bw,by+bh-r); ctx.quadraticCurveTo(bx+bw,by+bh,bx+bw-r,by+bh);
+    ctx.lineTo(bx+r,by+bh); ctx.quadraticCurveTo(bx,by+bh,bx,by+bh-r);
+    ctx.lineTo(bx,by+r); ctx.quadraticCurveTo(bx,by,bx+r,by);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    ctx.save();
+    ctx.textAlign='center';
+    ctx.font='bold 30px Arial';
+    ctx.fillStyle='#ff5533';
+    ctx.shadowColor='#ff2200'; ctx.shadowBlur=18;
+    ctx.fillText('GAME OVER', W/2, by+42);
+    ctx.shadowBlur=0;
+    ctx.font='bold 20px monospace';
+    ctx.fillStyle='#ffd700';
+    ctx.fillText('Score  ' + Math.floor(score/10), W/2, by+76);
+    if (score>=hiScore && score>0) {
+      ctx.fillStyle='#ff88ff';
+      ctx.font='bold 16px Arial';
+      ctx.fillText('NEW RECORD!', W/2, by+102);
+    }
+    const p2 = 0.55+0.45*Math.sin(tick*0.1);
+    ctx.globalAlpha=p2;
+    ctx.font='14px Arial';
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    ctx.fillText('กด SPACE / คลิก เพื่อเล่นใหม่', W/2, by+130);
+    ctx.restore();
+  }
+}
+
+// ── Loop ─────────────────────────────────────────────────────────────────────
+function loop() {
+  update();
+  ctx.clearRect(0,0,W,H);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
