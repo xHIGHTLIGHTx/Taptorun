@@ -241,15 +241,34 @@ function spawnStars(x,y) {
   }
 }
 
+// ── difficulty config ──────────────────────────────────────────────────────────
+// score = raw tick count. display score = score/10
+// Each PHASE lasts until displayScore reaches 'until'
+const PHASES = [
+  { until:  200, speed: 2.4, gap: 155, single: true,  label: 'EASY',   col: '#44aa44' },
+  { until:  500, speed: 3.0, gap: 130, single: true,  label: 'EASY',   col: '#44aa44' },
+  { until: 1000, speed: 3.8, gap: 108, single: false, label: 'NORMAL', col: '#ddaa00' },
+  { until: 1800, speed: 4.6, gap:  90, single: false, label: 'NORMAL', col: '#ddaa00' },
+  { until: 2800, speed: 5.5, gap:  76, single: false, label: 'HARD',   col: '#ee6622' },
+  { until: 4000, speed: 6.5, gap:  65, single: false, label: 'HARD',   col: '#ee6622' },
+  { until: 9999, speed: 7.8, gap:  54, single: false, label: 'INSANE', col: '#cc2222' },
+];
+
+function getPhase(displayScore) {
+  for (const p of PHASES) if (displayScore < p.until) return p;
+  return PHASES[PHASES.length - 1];
+}
+
 // ── state ──────────────────────────────────────────────────────────────────────
 let state    = 'waiting';
 let score    = 0;
 let hiScore  = parseInt(localStorage.getItem('tapRunHi')||'0',10);
-let speed    = 4.0;
+let speed    = 2.4;
 let tick     = 0;
 let bgX      = 0;
 let groundX  = 0;
 let flashAlp = 0;
+let curPhase = PHASES[0];
 
 // ── character ─────────────────────────────────────────────────────────────────
 const JUMP_V = -13;
@@ -259,17 +278,25 @@ const char   = { x:100, y:GROUND, w:70, h:94, vy:0, jumps:0, maxJ:2, bob:0, dead
 // ── obstacles ─────────────────────────────────────────────────────────────────
 let obstacles = [];
 let obstTimer = 0;
-let obstGap   = 85;
+let obstGap   = 155;
+
+function randType() { return OBS_TYPES[Math.floor(Math.random()*OBS_TYPES.length)]; }
 
 function spawnObs() {
+  const phase = curPhase;
   const r = Math.random();
-  const t = OBS_TYPES[Math.floor(Math.random()*OBS_TYPES.length)];
-  if (r < 0.6) {
-    obstacles.push({ x:W+20, y:GROUND, w:30, h:80, type:t });
-  } else {
+  if (phase.single || r < 0.55) {
+    // single obstacle
+    obstacles.push({ x:W+20, y:GROUND, w:30, h:80, type:randType() });
+  } else if (r < 0.82) {
     // double
-    obstacles.push({ x:W+20,  y:GROUND, w:30, h:60, type:OBS_TYPES[Math.floor(Math.random()*OBS_TYPES.length)] });
-    obstacles.push({ x:W+70, y:GROUND, w:30, h:60, type:OBS_TYPES[Math.floor(Math.random()*OBS_TYPES.length)] });
+    obstacles.push({ x:W+20, y:GROUND, w:30, h:60, type:randType() });
+    obstacles.push({ x:W+68, y:GROUND, w:30, h:60, type:randType() });
+  } else {
+    // triple (hard+ only)
+    obstacles.push({ x:W+20, y:GROUND, w:30, h:55, type:randType() });
+    obstacles.push({ x:W+62, y:GROUND, w:30, h:62, type:randType() });
+    obstacles.push({ x:W+104,y:GROUND, w:30, h:50, type:randType() });
   }
 }
 
@@ -288,8 +315,11 @@ canvas.addEventListener('pointerdown', e => { e.preventDefault(); onAct(); });
 
 // ── reset ──────────────────────────────────────────────────────────────────────
 function doReset() {
-  score=0; speed=4.0; tick=0; flashAlp=0;
-  obstacles=[]; obstTimer=0; obstGap=85;
+  score=0; tick=0; flashAlp=0;
+  curPhase = PHASES[0];
+  speed    = curPhase.speed;
+  obstGap  = curPhase.gap;
+  obstacles=[]; obstTimer=0;
   dusts=[]; stars=[];
   char.y=GROUND; char.vy=0; char.jumps=0; char.dead=false;
   state='playing';
@@ -300,8 +330,18 @@ function update() {
   if (state!=='playing') return;
   tick++; score++;
 
-  if (tick%400===0) { speed=Math.min(speed+0.3,11); obstGap=Math.max(46,obstGap-2); }
-  if (score%1000===0 && score>0) sfxCoin();
+  // smooth difficulty from phase table
+  const ds = Math.floor(score/10);
+  const newPhase = getPhase(ds);
+  if (newPhase !== curPhase) {
+    curPhase = newPhase;
+    sfxCoin();
+  }
+  // lerp speed & gap smoothly toward target
+  speed   += (curPhase.speed - speed) * 0.015;
+  obstGap += (curPhase.gap   - obstGap) * 0.015;
+
+  if (score%1000===0 && score>0 && newPhase===curPhase) sfxCoin();
 
   // bg scroll
   bgX = (bgX - speed*0.6) % bgScrollW;
@@ -438,6 +478,20 @@ function draw() {
   ctx.font='8px "Press Start 2P", monospace';
   ctx.fillStyle='#558855';
   ctx.fillText('BEST  '+String(Math.floor(hiScore/10)).padStart(6,'0'),W-16,78);
+
+  // difficulty badge
+  ctx.textAlign='left';
+  ctx.fillStyle='rgba(255,255,255,0.88)';
+  ctx.fillRect(8,8,110,32);
+  ctx.strokeStyle='#5a3010'; ctx.lineWidth=2;
+  ctx.strokeRect(8,8,110,32);
+  ctx.font='7px "Press Start 2P", monospace';
+  ctx.fillStyle='#555';
+  ctx.fillText('LEVEL',14,22);
+  ctx.font='9px "Press Start 2P", monospace';
+  ctx.fillStyle = state==='playing' ? curPhase.col : '#888';
+  ctx.fillText(state==='playing' ? curPhase.label : '---', 14, 36);
+
   ctx.restore();
 
   // ── waiting overlay ──
